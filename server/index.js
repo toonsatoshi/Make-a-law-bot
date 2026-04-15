@@ -149,6 +149,10 @@ if (botToken) {
                 const name = match.name.official_full || r.name;
                 
                 const buttons = [];
+                // Add the specific test fax number provided by the user
+                const testFax = "12066578208";
+                buttons.push([{ text: `📠 TEST FAX TO LEXBOT LINE`, callback_data: `fax_${testFax}` }]);
+
                 if (fax && phaxio) {
                   buttons.push([{ text: `📠 FAX BILL TO ${r.name}`, callback_data: `fax_${fax.replace(/\D/g,"")}` }]);
                 }

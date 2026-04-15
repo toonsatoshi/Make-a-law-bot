@@ -78,29 +78,42 @@ if (botToken) {
   bot = new Telegraf(botToken);
   bot.use(session());
 
+  // Error handling
+  bot.catch((err, ctx) => {
+    console.error(`Telegraf error for ${ctx.updateType}:`, err);
+  });
+
   bot.start((ctx) => {
-    ctx.session = { messages: [] };
-    const miniAppUrl = process.env.MINI_APP_URL || `https://${publicDomain}`;
-    ctx.reply(WELCOME_TEXT, {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🚀 Open LexBot Mini App", web_app: { url: miniAppUrl } }]
-        ]
-      }
-    });
+    try {
+      ctx.session = { messages: [] };
+      const domain = publicDomain || "localhost:3000";
+      const miniAppUrl = process.env.MINI_APP_URL || (domain.startsWith("http") ? domain : `https://${domain}`);
+      
+      console.log(`Sending start message with Mini App URL: ${miniAppUrl}`);
+      
+      return ctx.reply(WELCOME_TEXT, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🚀 Open LexBot Mini App", web_app: { url: miniAppUrl } }]
+          ]
+        }
+      });
+    } catch (err) {
+      console.error("Error in start command:", err);
+    }
   });
 
   bot.on("text", async (ctx) => {
-    if (!ctx.session) ctx.session = { messages: [] };
-    const userText = ctx.message.text;
-    ctx.session.messages.push({ role: "user", content: userText });
-
-    const apiMessages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...ctx.session.messages
-    ];
-
     try {
+      if (!ctx.session) ctx.session = { messages: [] };
+      const userText = ctx.message.text;
+      ctx.session.messages.push({ role: "user", content: userText });
+
+      const apiMessages = [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...ctx.session.messages
+      ];
+
       const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -118,21 +131,25 @@ if (botToken) {
       const raw = data.choices?.[0]?.message?.content || "Error. Try again.";
       ctx.session.messages.push({ role: "assistant", content: raw });
       const cleanMsg = raw.replace("BILL_READY", "").trim();
-      ctx.reply(cleanMsg);
+      return ctx.reply(cleanMsg);
     } catch (err) {
-      console.error("Bot AI error:", err);
-      ctx.reply("My circuits are jammed. Try again in a second.");
+      console.error("Bot text handler error:", err);
+      return ctx.reply("My circuits are jammed. Try again in a second.");
     }
   });
 
   // Use Webhooks if domain is available, else fallback to polling for local dev
-  if (publicDomain) {
+  if (publicDomain && !publicDomain.includes("localhost")) {
     const secretPath = `/telegraf/${bot.secretPathComponent()}`;
-    bot.telegram.setWebhook(`https://${publicDomain}${secretPath}`);
+    bot.telegram.setWebhook(`https://${publicDomain}${secretPath}`).catch(err => {
+      console.error("Failed to set webhook:", err);
+    });
     app.use(bot.webhookCallback(secretPath));
     console.log(`Telegram Bot configured with Webhook: https://${publicDomain}${secretPath}`);
   } else {
-    bot.launch().then(() => console.log("Telegram Bot started (Polling)"));
+    bot.launch().then(() => console.log("Telegram Bot started (Polling)")).catch(err => {
+      console.error("Failed to launch bot (polling):", err);
+    });
   }
 } else {
   console.log("TELEGRAM_BOT_TOKEN not found. Bot disabled.");

@@ -69,8 +69,9 @@ IMPORTANT RULES:
 
 const WELCOME_TEXT = "⚖ LEXBOT\n\nYou witnessed something wrong. Something that should not be allowed.\n\nTell me what it was.\n\nI will help you write the law.";
 
-// ── Telegram Bot ────────────────────────────────────────────────────────────
+// ── Telegram Bot (Webhook) ──────────────────────────────────────────────────
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
+const publicDomain = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.MINI_APP_URL?.replace("https://", "");
 let bot;
 
 if (botToken) {
@@ -79,7 +80,7 @@ if (botToken) {
 
   bot.start((ctx) => {
     ctx.session = { messages: [] };
-    const miniAppUrl = process.env.MINI_APP_URL || "https://lexbot-production.up.railway.app";
+    const miniAppUrl = process.env.MINI_APP_URL || `https://${publicDomain}`;
     ctx.reply(WELCOME_TEXT, {
       reply_markup: {
         inline_keyboard: [
@@ -92,7 +93,6 @@ if (botToken) {
   bot.on("text", async (ctx) => {
     if (!ctx.session) ctx.session = { messages: [] };
     const userText = ctx.message.text;
-
     ctx.session.messages.push({ role: "user", content: userText });
 
     const apiMessages = [
@@ -116,20 +116,24 @@ if (botToken) {
 
       const data = await response.json();
       const raw = data.choices?.[0]?.message?.content || "Error. Try again.";
-
       ctx.session.messages.push({ role: "assistant", content: raw });
-      
-      // If the bill is ready, we might want to clean up the marker for better Telegram display
       const cleanMsg = raw.replace("BILL_READY", "").trim();
       ctx.reply(cleanMsg);
-
     } catch (err) {
       console.error("Bot AI error:", err);
       ctx.reply("My circuits are jammed. Try again in a second.");
     }
   });
 
-  bot.launch().then(() => console.log("Telegram Bot started"));
+  // Use Webhooks if domain is available, else fallback to polling for local dev
+  if (publicDomain) {
+    const secretPath = `/telegraf/${bot.secretPathComponent()}`;
+    bot.telegram.setWebhook(`https://${publicDomain}${secretPath}`);
+    app.use(bot.webhookCallback(secretPath));
+    console.log(`Telegram Bot configured with Webhook: https://${publicDomain}${secretPath}`);
+  } else {
+    bot.launch().then(() => console.log("Telegram Bot started (Polling)"));
+  }
 } else {
   console.log("TELEGRAM_BOT_TOKEN not found. Bot disabled.");
 }

@@ -125,15 +125,35 @@ if (botToken) {
             
             if (repData.results && repData.results.length > 0) {
               let msg = `🏛 *YOUR REPRESENTATIVES*\n\n`;
+              const buttons = [];
+
               repData.results.forEach(r => {
                 msg += `*${r.name}* (${r.party})\n`;
-                if (r.phone) msg += `📞 ${r.phone}\n`;
-                if (r.link) msg += `🔗 [Contact](${r.link})\n`;
-                msg += `\n`;
+                const row = [];
+                
+                // Button 1: Resistbot (Industry standard for Telegram -> Congress)
+                // We use a deep link that tells the user what to do
+                row.push({ 
+                  text: `📮 Send to ${r.name.split(' ').pop()}`, 
+                  url: `https://t.me/resistbot?start=letter` 
+                });
+
+                // Button 2: Direct Web Form
+                if (r.link) {
+                  row.push({ text: "🌐 Web Form", url: r.link });
+                }
+                
+                buttons.push(row);
               });
-              msg += `_Copy your bill text from above and paste it into their contact forms._`;
+
+              msg += `\n*HOW TO SEND:*\n1. Copy your bill text above.\n2. Click the 📮 button to open Resistbot.\n3. Paste the bill and Resistbot will deliver it to their office.`;
+              
               ctx.session.waitingForZip = false;
-              return ctx.replyWithMarkdown(msg);
+              return ctx.replyWithMarkdown(msg, {
+                reply_markup: {
+                  inline_keyboard: buttons
+                }
+              });
             } else {
               return ctx.reply("No representatives found for that ZIP. Try another 5-digit ZIP code.");
             }

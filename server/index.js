@@ -87,7 +87,12 @@ if (botToken) {
     try {
       ctx.session = { messages: [] };
       const domain = publicDomain || "localhost:3000";
-      const miniAppUrl = process.env.MINI_APP_URL || (domain.startsWith("http") ? domain : `https://${domain}`);
+      let miniAppUrl = process.env.MINI_APP_URL || (domain.startsWith("http") ? domain : `https://${domain}`);
+      
+      // Strict enforcement: Telegram Mini Apps REQUIRE https://
+      if (!miniAppUrl.startsWith("https://") && !miniAppUrl.includes("localhost")) {
+        miniAppUrl = `https://${miniAppUrl.replace(/^http:\/\//, "")}`;
+      }
       
       console.log(`Sending start message with Mini App URL: ${miniAppUrl}`);
       

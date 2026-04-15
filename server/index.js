@@ -85,16 +85,13 @@ if (botToken) {
 
   bot.start((ctx) => {
     try {
-      ctx.session = { messages: [] };
+      ctx.session = { messages: [], waitingForZip: false };
       const domain = publicDomain || "localhost:3000";
       let miniAppUrl = process.env.MINI_APP_URL || (domain.startsWith("http") ? domain : `https://${domain}`);
       
-      // Strict enforcement: Telegram Mini Apps REQUIRE https://
       if (!miniAppUrl.startsWith("https://") && !miniAppUrl.includes("localhost")) {
         miniAppUrl = `https://${miniAppUrl.replace(/^http:\/\//, "")}`;
       }
-      
-      console.log(`Sending start message with Mini App URL: ${miniAppUrl}`);
       
       return ctx.reply(WELCOME_TEXT, {
         reply_markup: {
@@ -108,10 +105,44 @@ if (botToken) {
     }
   });
 
+  bot.command("new", (ctx) => {
+    ctx.session = { messages: [], waitingForZip: false };
+    return ctx.reply("Session reset. Tell me what's wrong.");
+  });
+
   bot.on("text", async (ctx) => {
     try {
-      if (!ctx.session) ctx.session = { messages: [] };
-      const userText = ctx.message.text;
+      if (!ctx.session) ctx.session = { messages: [], waitingForZip: false };
+      const userText = ctx.message.text.trim();
+
+      // Handle ZIP code input if we are waiting for it
+      if (ctx.session.waitingForZip) {
+        if (/^\d{5}$/.test(userText)) {
+          await ctx.reply("Searching for your representatives...");
+          try {
+            const repRes = await fetch(`https://whoismyrepresentative.com/getall_mems.php?zip=${userText}&output=json`);
+            const repData = await repRes.json();
+            
+            if (repData.results && repData.results.length > 0) {
+              let msg = `🏛 *YOUR REPRESENTATIVES*\n\n`;
+              repData.results.forEach(r => {
+                msg += `*${r.name}* (${r.party})\n`;
+                if (r.phone) msg += `📞 ${r.phone}\n`;
+                if (r.link) msg += `🔗 [Contact](${r.link})\n`;
+                msg += `\n`;
+              });
+              msg += `_Copy your bill text from above and paste it into their contact forms._`;
+              ctx.session.waitingForZip = false;
+              return ctx.replyWithMarkdown(msg);
+            } else {
+              return ctx.reply("No representatives found for that ZIP. Try another 5-digit ZIP code.");
+            }
+          } catch (e) {
+            return ctx.reply("Couldn't reach representative database. Try again later or use House.gov.");
+          }
+        }
+      }
+
       ctx.session.messages.push({ role: "user", content: userText });
 
       const apiMessages = [
@@ -135,8 +166,15 @@ if (botToken) {
       const data = await response.json();
       const raw = data.choices?.[0]?.message?.content || "Error. Try again.";
       ctx.session.messages.push({ role: "assistant", content: raw });
-      const cleanMsg = raw.replace("BILL_READY", "").trim();
-      return ctx.reply(cleanMsg);
+
+      if (raw.includes("BILL_READY")) {
+        const cleanMsg = raw.replace("BILL_READY", "").trim();
+        await ctx.reply(cleanMsg);
+        ctx.session.waitingForZip = true;
+        return ctx.reply("🔥 YOUR BILL IS READY.\n\nTo find your representatives and send this to them, reply with your 5-digit ZIP code.");
+      }
+
+      return ctx.reply(raw.trim());
     } catch (err) {
       console.error("Bot text handler error:", err);
       return ctx.reply("My circuits are jammed. Try again in a second.");

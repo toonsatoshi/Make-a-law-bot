@@ -85,118 +85,94 @@ if (botToken) {
   bot = new Telegraf(botToken);
   bot.use(session());
 
-  // Error handling
   bot.catch((err, ctx) => {
     console.error(`Telegraf error for ${ctx.updateType}:`, err);
   });
 
   bot.start((ctx) => {
     try {
-      ctx.session = { messages: [], waitingForZip: false, currentBill: "" };
+      ctx.session = { messages: [], waitingForZip: false, currentBill: "", foundFaxes: [] };
       const domain = publicDomain || "localhost:3000";
       let miniAppUrl = process.env.MINI_APP_URL || (domain.startsWith("http") ? domain : `https://${domain}`);
-      
       if (!miniAppUrl.startsWith("https://") && !miniAppUrl.includes("localhost")) {
         miniAppUrl = `https://${miniAppUrl.replace(/^http:\/\//, "")}`;
       }
-      
       return ctx.reply(WELCOME_TEXT, {
         reply_markup: {
-          inline_keyboard: [
-            [{ text: "🚀 Open LexBot Mini App", web_app: { url: miniAppUrl } }]
-          ]
+          inline_keyboard: [[{ text: "🚀 Open LexBot Mini App", web_app: { url: miniAppUrl } }]]
         }
       });
-    } catch (err) {
-      console.error("Error in start command:", err);
-    }
+    } catch (err) { console.error("Start error:", err); }
   });
 
   bot.command("new", (ctx) => {
-    ctx.session = { messages: [], waitingForZip: false, currentBill: "" };
+    ctx.session = { messages: [], waitingForZip: false, currentBill: "", foundFaxes: [] };
     return ctx.reply("Session reset. Tell me what's wrong.");
   });
 
   bot.on("text", async (ctx) => {
     try {
-      if (!ctx.session) ctx.session = { messages: [], waitingForZip: false, currentBill: "" };
+      if (!ctx.session) ctx.session = { messages: [], waitingForZip: false, currentBill: "", foundFaxes: [] };
       const userText = ctx.message.text.trim();
 
-      // Handle ZIP code input if we are waiting for it
       if (ctx.session.waitingForZip && /^\d{5}$/.test(userText)) {
-        await ctx.reply("Locating your representatives and their fax lines...");
+        await ctx.reply("Searching for representatives and their official fax lines...");
         try {
-          // Fetch master list of legislators for FAX numbers
           const res = await fetch("https://theunitedstates.io/congress-legislators/legislators-current.json");
           const allReps = await res.json();
           
-          // Use ZIP to find names
           const zipRes = await fetch(`https://whoismyrepresentative.com/getall_mems.php?zip=${userText}&output=json`);
           const zipData = await zipRes.json();
           
-          if (zipData.results && zipData.results.length > 0) {
-            let foundCount = 0;
-            for (const r of zipData.results) {
-              // Match by name
-              const match = allReps.find(lr => 
-                lr.name.official_full === r.name || 
-                lr.name.last === r.name.split(" ").pop()
-              );
-              
-              if (match && match.terms) {
-                const term = match.terms[match.terms.length - 1];
-                const fax = term.fax;
-                const name = match.name.official_full || r.name;
-                
-                const buttons = [];
-                // Add the specific test fax number provided by the user
-                const testFax = "12066578208";
-                buttons.push([{ text: `📠 TEST FAX TO LEXBOT LINE`, callback_data: `fax_${testFax}` }]);
+          if (!zipData.results) return ctx.reply("No representatives found for that ZIP.");
 
-                if (fax && phaxio) {
-                  buttons.push([{ text: `📠 FAX BILL TO ${r.name}`, callback_data: `fax_${fax.replace(/\D/g,"")}` }]);
-                }
-                if (r.link) {
-                  buttons.push([{ text: `🔗 WEB FORM: ${r.name}`, url: r.link }]);
-                }
+          let faxList = [];
+          let msg = `🏛 *OFFICIALS FOR ${userText}*\n\n`;
 
-                await ctx.reply(`🏛 ${name}\nFax: ${fax || "Not available"}\nPhone: ${r.phone}`, 
-                  buttons.length > 0 ? Markup.inlineKeyboard(buttons) : null
-                );
-                foundCount++;
+          for (const r of zipData.results) {
+            const match = allReps.find(lr => 
+              lr.name.official_full === r.name || 
+              lr.name.last === r.name.split(" ").pop()
+            );
+            
+            if (match && match.terms) {
+              const term = match.terms[match.terms.length - 1];
+              const fax = term.fax;
+              if (fax) {
+                const cleanFax = fax.replace(/\D/g,"");
+                faxList.push({ name: r.name, number: cleanFax });
+                msg += `✅ *${r.name}* (Fax: ${fax})\n`;
+              } else {
+                msg += `❌ *${r.name}* (Fax not available)\n`;
               }
             }
-
-            ctx.session.waitingForZip = false;
-            if (foundCount === 0) return ctx.reply("Found your reps but couldn't verify their fax numbers. Use the web forms above.");
-            return ctx.reply("Ready. Click a FAX button above to actually send your bill to that office.");
-          } else {
-            return ctx.reply("No representatives found for that ZIP. Try another 5-digit ZIP code.");
           }
+
+          ctx.session.foundFaxes = faxList;
+          ctx.session.waitingForZip = false;
+
+          const buttons = [];
+          if (faxList.length > 0) {
+            buttons.push([{ text: `📠 SEND BILL TO ALL (${faxList.length})`, callback_data: "send_all_faxes" }]);
+          }
+          // User provided test number
+          buttons.push([{ text: `🧪 TEST SEND (+1 206 657 8208)`, callback_data: "fax_12066578208" }]);
+          buttons.push([{ text: "🔄 Try Different ZIP", callback_data: "re_zip" }]);
+
+          return ctx.replyWithMarkdown(msg + "\n_Ready to transmit?_", Markup.inlineKeyboard(buttons));
         } catch (e) {
           console.error("Lookup error:", e);
-          return ctx.reply("Couldn't reach representative database. Try again later or use House.gov.");
+          return ctx.reply("Error connecting to Congressional databases.");
         }
       }
 
       ctx.session.messages.push({ role: "user", content: userText });
-
-      const apiMessages = [
-        { role: "system", content: SYSTEM_PROMPT },
-        ...ctx.session.messages
-      ];
+      const apiMessages = [{ role: "system", content: SYSTEM_PROMPT }, ...ctx.session.messages];
 
       const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          max_tokens: 1200,
-          messages: apiMessages,
-        }),
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}` },
+        body: JSON.stringify({ model: "deepseek-chat", max_tokens: 1200, messages: apiMessages }),
       });
 
       const data = await response.json();
@@ -207,113 +183,91 @@ if (botToken) {
         ctx.session.currentBill = raw.replace("BILL_READY", "").trim();
         await ctx.reply(ctx.session.currentBill);
         ctx.session.waitingForZip = true;
-        return ctx.reply("🔥 YOUR BILL IS READY.\n\nTo find your representatives and fax this to them, reply with your 5-digit ZIP code.");
+        return ctx.reply("🔥 BILL DRAFTED.\n\nType your 5-digit ZIP code to target your representatives.");
       }
-
       return ctx.reply(raw.trim());
-    } catch (err) {
-      console.error("Bot text handler error:", err);
-      return ctx.reply("My circuits are jammed. Try again in a second.");
-    }
+    } catch (err) { return ctx.reply("Connection error."); }
   });
 
   bot.on("callback_query", async (ctx) => {
     try {
       const data = ctx.callbackQuery.data;
+      if (!phaxio) return ctx.answerCbQuery("Fax service (PHAXIO_KEY) not configured.", { show_alert: true });
+
+      if (data === "re_zip") {
+        ctx.session.waitingForZip = true;
+        return ctx.editMessageText("Enter your 5-digit ZIP code.");
+      }
+
+      if (data === "send_all_faxes") {
+        const faxList = ctx.session?.foundFaxes;
+        const bill = ctx.session?.currentBill;
+        if (!faxList || faxList.length === 0 || !bill) return ctx.answerCbQuery("Session expired.");
+
+        await ctx.answerCbQuery("Transmitting to all...");
+        await ctx.reply(`🚀 Broadcasting your bill to ${faxList.length} offices...`);
+
+        for (const target of faxList) {
+          try {
+            const res = await phaxio.faxes.create({ to: target.number, string_data: bill, string_data_type: "text" });
+            if (res.success) {
+              await ctx.reply(`✅ SENT to ${target.name} (${target.number})\nID: ${res.data.id}`);
+            } else {
+              await ctx.reply(`❌ FAILED for ${target.name}: ${res.message}`);
+            }
+          } catch (e) { await ctx.reply(`❌ ERROR for ${target.name}`); }
+        }
+        return ctx.reply("⚡ TRANSMISSION COMPLETE.");
+      }
+
       if (data.startsWith("fax_")) {
-        if (!phaxio) return ctx.answerCbQuery("Fax service not configured on server.", { show_alert: true });
-        
         const faxNumber = data.split("_")[1];
-        const billText = ctx.session?.currentBill;
+        const bill = ctx.session?.currentBill;
+        if (!bill) return ctx.answerCbQuery("Bill missing.");
 
-        if (!billText) return ctx.answerCbQuery("Bill text missing. Start over with /new", { show_alert: true });
-
-        await ctx.answerCbQuery("Sending fax... please wait.");
-        await ctx.reply(`📤 Initiating fax to ${faxNumber}...`);
-
-        const result = await phaxio.faxes.create({
-          to: faxNumber,
-          string_data: billText,
-          string_data_type: "text"
-        });
-
-        if (result.success) {
-          return ctx.reply(`✅ FAX SENT!\nTracking ID: ${result.data.id}\n\nThe legislative office will receive your bill shortly.`);
+        await ctx.answerCbQuery("Sending test fax...");
+        const res = await phaxio.faxes.create({ to: faxNumber, string_data: bill, string_data_type: "text" });
+        if (res.success) {
+          return ctx.reply(`✅ TEST FAX SENT to ${faxNumber}\nID: ${res.data.id}`);
         } else {
-          return ctx.reply(`❌ FAX FAILED: ${result.message}`);
+          return ctx.reply(`❌ TEST FAILED: ${res.message}`);
         }
       }
-    } catch (err) {
-      console.error("Fax callback error:", err);
-      return ctx.reply("❌ ERROR: Could not reach the fax service.");
-    }
+    } catch (err) { console.error(err); }
   });
 
-  // Use Webhooks if domain is available, else fallback to polling for local dev
   if (publicDomain && !publicDomain.includes("localhost")) {
     const secretPath = `/telegraf/${bot.secretPathComponent()}`;
-    bot.telegram.setWebhook(`https://${publicDomain}${secretPath}`).catch(err => {
-      console.error("Failed to set webhook:", err);
-    });
+    bot.telegram.setWebhook(`https://${publicDomain}${secretPath}`).catch(e => console.error(e));
     app.use(bot.webhookCallback(secretPath));
-    console.log(`Telegram Bot configured with Webhook: https://${publicDomain}${secretPath}`);
+    console.log(`Webhook active: https://${publicDomain}${secretPath}`);
   } else {
-    bot.launch().then(() => console.log("Telegram Bot started (Polling)")).catch(err => {
-      console.error("Failed to launch bot (polling):", err);
-    });
+    bot.launch().then(() => console.log("Polling active"));
   }
-} else {
-  console.log("TELEGRAM_BOT_TOKEN not found. Bot disabled.");
 }
 
 // ── DeepSeek proxy (Mini App API) ───────────────────────────────────────────
 app.post("/api/chat", async (req, res) => {
   const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "DEEPSEEK_API_KEY not configured on server." });
-  }
-
+  if (!apiKey) return res.status(500).json({ error: "DEEPSEEK_API_KEY missing" });
   try {
     const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
       body: JSON.stringify(req.body),
     });
-
     const data = await response.json();
-    if (!response.ok) return res.status(response.status).json(data);
     res.json(data);
-  } catch (err) {
-    console.error("DeepSeek proxy error:", err);
-    res.status(502).json({ error: "Failed to reach DeepSeek API." });
-  }
+  } catch (err) { res.status(502).json({ error: "DeepSeek error" }); }
 });
 
-// ── Health check ─────────────────────────────────────────────────────────────
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
-
-// ── Serve React build ─────────────────────────────────────────────────────────
 const clientDist = join(__dirname, "../client/dist");
 app.use(express.static(clientDist));
-app.get("*", (_req, res) => {
-  res.sendFile(join(clientDist, "index.html"));
-});
+app.get("*", (_req, res) => res.sendFile(join(clientDist, "index.html")));
 
-// ── Start ─────────────────────────────────────────────────────────────────────
 const server = createServer(app);
-server.listen(PORT, () => {
-  console.log(`LEXBOT server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`LEXBOT running on ${PORT}`));
 
-// Graceful stop
-process.once("SIGINT", () => {
-  if (bot) bot.stop("SIGINT");
-  process.exit();
-});
-process.once("SIGTERM", () => {
-  if (bot) bot.stop("SIGTERM");
-  process.exit();
-});
+process.once("SIGINT", () => { if (bot) bot.stop("SIGINT"); process.exit(); });
+process.once("SIGTERM", () => { if (bot) bot.stop("SIGTERM"); process.exit(); });

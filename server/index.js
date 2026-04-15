@@ -5,7 +5,8 @@ import { createServer } from "http";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import fetch from "node-fetch";
-import { Telegraf, session } from "telegraf";
+import { Telegraf, session, Markup } from "telegraf";
+import Phaxio from "phaxio";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -13,6 +14,12 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// ── Phaxio Client ───────────────────────────────────────────────────────────
+let phaxio;
+if (process.env.PHAXIO_KEY && process.env.PHAXIO_SECRET) {
+  phaxio = new Phaxio(process.env.PHAXIO_KEY, process.env.PHAXIO_SECRET);
+}
 
 const SYSTEM_PROMPT = `You are LEXBOT — a legislative drafting assistant that helps ordinary citizens transform their lived experiences and grievances into real, structured legislation.
 
@@ -85,7 +92,7 @@ if (botToken) {
 
   bot.start((ctx) => {
     try {
-      ctx.session = { messages: [], waitingForZip: false };
+      ctx.session = { messages: [], waitingForZip: false, currentBill: "" };
       const domain = publicDomain || "localhost:3000";
       let miniAppUrl = process.env.MINI_APP_URL || (domain.startsWith("http") ? domain : `https://${domain}`);
       
@@ -106,60 +113,65 @@ if (botToken) {
   });
 
   bot.command("new", (ctx) => {
-    ctx.session = { messages: [], waitingForZip: false };
+    ctx.session = { messages: [], waitingForZip: false, currentBill: "" };
     return ctx.reply("Session reset. Tell me what's wrong.");
   });
 
   bot.on("text", async (ctx) => {
     try {
-      if (!ctx.session) ctx.session = { messages: [], waitingForZip: false };
+      if (!ctx.session) ctx.session = { messages: [], waitingForZip: false, currentBill: "" };
       const userText = ctx.message.text.trim();
 
       // Handle ZIP code input if we are waiting for it
-      if (ctx.session.waitingForZip) {
-        if (/^\d{5}$/.test(userText)) {
-          await ctx.reply("Searching for your representatives...");
-          try {
-            const repRes = await fetch(`https://whoismyrepresentative.com/getall_mems.php?zip=${userText}&output=json`);
-            const repData = await repRes.json();
-            
-            if (repData.results && repData.results.length > 0) {
-              let msg = `🏛 *YOUR REPRESENTATIVES*\n\n`;
-              const buttons = [];
-
-              repData.results.forEach(r => {
-                msg += `*${r.name}* (${r.party})\n`;
-                const row = [];
-                
-                // Button 1: Resistbot (Industry standard for Telegram -> Congress)
-                // We use a deep link that tells the user what to do
-                row.push({ 
-                  text: `📮 Send to ${r.name.split(' ').pop()}`, 
-                  url: `https://t.me/resistbot?start=letter` 
-                });
-
-                // Button 2: Direct Web Form
-                if (r.link) {
-                  row.push({ text: "🌐 Web Form", url: r.link });
-                }
-                
-                buttons.push(row);
-              });
-
-              msg += `\n*HOW TO SEND:*\n1. Copy your bill text above.\n2. Click the 📮 button to open Resistbot.\n3. Paste the bill and Resistbot will deliver it to their office.`;
+      if (ctx.session.waitingForZip && /^\d{5}$/.test(userText)) {
+        await ctx.reply("Locating your representatives and their fax lines...");
+        try {
+          // Fetch master list of legislators for FAX numbers
+          const res = await fetch("https://theunitedstates.io/congress-legislators/legislators-current.json");
+          const allReps = await res.json();
+          
+          // Use ZIP to find names
+          const zipRes = await fetch(`https://whoismyrepresentative.com/getall_mems.php?zip=${userText}&output=json`);
+          const zipData = await zipRes.json();
+          
+          if (zipData.results && zipData.results.length > 0) {
+            let foundCount = 0;
+            for (const r of zipData.results) {
+              // Match by name
+              const match = allReps.find(lr => 
+                lr.name.official_full === r.name || 
+                lr.name.last === r.name.split(" ").pop()
+              );
               
-              ctx.session.waitingForZip = false;
-              return ctx.replyWithMarkdown(msg, {
-                reply_markup: {
-                  inline_keyboard: buttons
+              if (match && match.terms) {
+                const term = match.terms[match.terms.length - 1];
+                const fax = term.fax;
+                const name = match.name.official_full || r.name;
+                
+                const buttons = [];
+                if (fax && phaxio) {
+                  buttons.push([{ text: `📠 FAX BILL TO ${r.name}`, callback_data: `fax_${fax.replace(/\D/g,"")}` }]);
                 }
-              });
-            } else {
-              return ctx.reply("No representatives found for that ZIP. Try another 5-digit ZIP code.");
+                if (r.link) {
+                  buttons.push([{ text: `🔗 WEB FORM: ${r.name}`, url: r.link }]);
+                }
+
+                await ctx.reply(`🏛 ${name}\nFax: ${fax || "Not available"}\nPhone: ${r.phone}`, 
+                  buttons.length > 0 ? Markup.inlineKeyboard(buttons) : null
+                );
+                foundCount++;
+              }
             }
-          } catch (e) {
-            return ctx.reply("Couldn't reach representative database. Try again later or use House.gov.");
+
+            ctx.session.waitingForZip = false;
+            if (foundCount === 0) return ctx.reply("Found your reps but couldn't verify their fax numbers. Use the web forms above.");
+            return ctx.reply("Ready. Click a FAX button above to actually send your bill to that office.");
+          } else {
+            return ctx.reply("No representatives found for that ZIP. Try another 5-digit ZIP code.");
           }
+        } catch (e) {
+          console.error("Lookup error:", e);
+          return ctx.reply("Couldn't reach representative database. Try again later or use House.gov.");
         }
       }
 
@@ -188,16 +200,48 @@ if (botToken) {
       ctx.session.messages.push({ role: "assistant", content: raw });
 
       if (raw.includes("BILL_READY")) {
-        const cleanMsg = raw.replace("BILL_READY", "").trim();
-        await ctx.reply(cleanMsg);
+        ctx.session.currentBill = raw.replace("BILL_READY", "").trim();
+        await ctx.reply(ctx.session.currentBill);
         ctx.session.waitingForZip = true;
-        return ctx.reply("🔥 YOUR BILL IS READY.\n\nTo find your representatives and send this to them, reply with your 5-digit ZIP code.");
+        return ctx.reply("🔥 YOUR BILL IS READY.\n\nTo find your representatives and fax this to them, reply with your 5-digit ZIP code.");
       }
 
       return ctx.reply(raw.trim());
     } catch (err) {
       console.error("Bot text handler error:", err);
       return ctx.reply("My circuits are jammed. Try again in a second.");
+    }
+  });
+
+  bot.on("callback_query", async (ctx) => {
+    try {
+      const data = ctx.callbackQuery.data;
+      if (data.startsWith("fax_")) {
+        if (!phaxio) return ctx.answerCbQuery("Fax service not configured on server.", { show_alert: true });
+        
+        const faxNumber = data.split("_")[1];
+        const billText = ctx.session?.currentBill;
+
+        if (!billText) return ctx.answerCbQuery("Bill text missing. Start over with /new", { show_alert: true });
+
+        await ctx.answerCbQuery("Sending fax... please wait.");
+        await ctx.reply(`📤 Initiating fax to ${faxNumber}...`);
+
+        const result = await phaxio.faxes.create({
+          to: faxNumber,
+          string_data: billText,
+          string_data_type: "text"
+        });
+
+        if (result.success) {
+          return ctx.reply(`✅ FAX SENT!\nTracking ID: ${result.data.id}\n\nThe legislative office will receive your bill shortly.`);
+        } else {
+          return ctx.reply(`❌ FAX FAILED: ${result.message}`);
+        }
+      }
+    } catch (err) {
+      console.error("Fax callback error:", err);
+      return ctx.reply("❌ ERROR: Could not reach the fax service.");
     }
   });
 
